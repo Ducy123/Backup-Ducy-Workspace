@@ -1,0 +1,163 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © AI
+
+//@version=5
+strategy("SMC & ICT Strategy (R:R 1:2)", shorttitle="ICT Strategy", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=1, max_boxes_count=500, max_lines_count=500, calc_on_every_tick = true)
+
+// --- Settings ---
+grp_strategy = "Strategy Settings"
+rr_ratio = input.float(2.0, title="Risk:Reward Ratio", group=grp_strategy)
+risk_per_trade = input.float(1.0, title="Risk % per Trade", group=grp_strategy)
+
+grp_general = "General Settings"
+length = input.int(10, title="Swing Length", group=grp_general)
+
+// Dashboard Settings
+grp_dash = "Dashboard Settings"
+show_dash = input.bool(true, title="Show Dashboard", group=grp_dash)
+
+// Colors
+color_bull = input.color(color.new(color.teal, 50), "Bullish Color")
+color_bear = input.color(color.new(color.red, 50), "Bearish Color")
+color_text = color.white
+
+// --- Logic (SMC/ICT) ---
+// Swing High/Low
+ph = ta.pivothigh(high, length, length)
+pl = ta.pivotlow(low, length, length)
+
+var float last_ph = na
+var float last_pl = na
+
+if not na(ph)
+    last_ph := ph
+if not na(pl)
+    last_pl := pl
+
+// Trend / Structure (Simplified)
+bool cross_up = ta.crossover(close, last_ph)
+bool cross_dn = ta.crossunder(close, last_pl)
+
+var int trend = 0 // 1 = Bullish, -1 = Bearish
+if cross_up
+    trend := 1
+else if cross_dn
+    trend := -1
+
+// FVG Detection
+fvg_bull = low > high[2] and close[1] > open[1]
+fvg_bear = high < low[2] and close[1] < open[1]
+
+var bool has_fvg_bull = false
+var bool has_fvg_bear = false
+
+if fvg_bull
+    has_fvg_bull := true
+    has_fvg_bear := false
+else if fvg_bear
+    has_fvg_bear := true
+    has_fvg_bull := false
+
+// Premium / Discount
+float swing_high = ta.highest(high, 50)
+float swing_low = ta.lowest(low, 50)
+float eq = (swing_high + swing_low) / 2
+bool in_discount = close < eq
+bool in_premium = close > eq
+
+// --- Strategy Entry ---
+long_valid = trend == 1 and has_fvg_bull and in_discount
+short_valid = trend == -1 and has_fvg_bear and in_premium
+
+long_trigger = long_valid and not long_valid[1]
+short_trigger = short_valid and not short_valid[1]
+
+// SL/TP Calculation
+var float sl_level = na
+var float tp_level = na
+var float entry_price = na
+
+if (long_trigger or short_trigger) and strategy.position_size == 0
+    entry_price := close
+    if long_trigger
+        sl_level := math.min(low, last_pl)
+        float risk = entry_price - sl_level
+        tp_level := entry_price + (risk * rr_ratio)
+        strategy.entry("Long", strategy.long)
+        strategy.exit("Exit Long", "Long", stop=sl_level, limit=tp_level, comment="L: "+str.tostring(rr_ratio))
+    else
+        sl_level := math.max(high, last_ph)
+        float risk = sl_level - entry_price
+        tp_level := entry_price - (risk * rr_ratio)
+        strategy.entry("Short", strategy.short)
+        strategy.exit("Exit Short", "Short", stop=sl_level, limit=tp_level, comment="S: "+str.tostring(rr_ratio))
+
+// --- Visual Boxes ---
+var box tp_box = na
+var box sl_box = na
+
+if strategy.position_size != 0 and strategy.position_size[1] == 0
+    // Trade Started
+    is_long = strategy.position_size > 0
+    tp_box := box.new(bar_index, is_long ? tp_level : entry_price, bar_index, is_long ? entry_price : tp_level, border_color=na, bgcolor=color.new(color.green, 80))
+    sl_box := box.new(bar_index, is_long ? entry_price : sl_level, bar_index, is_long ? sl_level : entry_price, border_color=na, bgcolor=color.new(color.red, 80))
+
+if strategy.position_size != 0
+    box.set_right(tp_box, bar_index)
+    box.set_right(sl_box, bar_index)
+
+// --- Stats & Recap Table ---
+var table recap = table.new(position.top_right, 2, 12, border_width = 1, border_color = color.gray, frame_width = 1, frame_color = color.gray, bgcolor = color.new(color.black, 80))
+
+// Metrics Calculation
+total_trades = strategy.closedtrades
+win_count = strategy.wintrades
+loss_count = strategy.losstrades
+win_rate = total_trades > 0 ? (win_count / total_trades) * 100 : 0
+pf = strategy.grossprofit / math.abs(strategy.grossloss)
+net_profit_r = (win_count * rr_ratio) - loss_count // Simplified R-multiple result
+
+if show_dash and barstate.islast
+    // Header
+    table.cell(recap, 0, 0, "METRIC", text_color=color_text, bgcolor=color.new(color.blue, 50))
+    table.cell(recap, 1, 0, "VALUE", text_color=color_text, bgcolor=color.new(color.blue, 50))
+    
+    // Rows
+    table.cell(recap, 0, 1, "Status", text_color=color_text)
+    table.cell(recap, 1, 1, strategy.position_size != 0 ? (strategy.position_size > 0 ? "LONG LIVE" : "SHORT LIVE") : "WAITING", text_color=strategy.position_size != 0 ? color.teal : color.orange)
+    
+    table.cell(recap, 0, 2, "Trades", text_color=color_text)
+    table.cell(recap, 1, 2, str.tostring(total_trades), text_color=color_text)
+    
+    table.cell(recap, 0, 3, "Wins / Losses", text_color=color_text)
+    table.cell(recap, 1, 3, str.tostring(win_count) + " / " + str.tostring(loss_count), text_color=color_text)
+    
+    table.cell(recap, 0, 4, "Win Rate", text_color=color_text)
+    table.cell(recap, 1, 4, str.tostring(win_rate, "#.##") + "%", text_color=win_rate > 50 ? color.teal : color.red)
+    
+    table.cell(recap, 0, 5, "Profit Factor", text_color=color_text)
+    table.cell(recap, 1, 5, str.tostring(pf, "#.##"), text_color=pf > 1 ? color.teal : color.red)
+    
+    table.cell(recap, 0, 6, "Net Result (R)", text_color=color_text)
+    table.cell(recap, 1, 6, str.tostring(net_profit_r, "#.##"), text_color=net_profit_r > 0 ? color.teal : color.red)
+    
+    table.cell(recap, 0, 7, "Equity", text_color=color_text)
+    table.cell(recap, 1, 7, str.tostring(strategy.equity, "#.##"), text_color=color_text)
+
+// Daily Recap Table (Simplified Overview)
+var table daily = table.new(position.bottom_right, 3, 2, border_width = 1, border_color = color.gray, frame_width = 1, bgcolor = color.new(color.black, 80))
+if show_dash and barstate.islast
+    table.cell(daily, 0, 0, "METRIC", text_color=color_text, bgcolor=color.new(color.blue, 50))
+    table.cell(daily, 1, 0, "VALUE", text_color=color_text, bgcolor=color.new(color.blue, 50))
+    table.cell(daily, 2, 0, "STATUS", text_color=color_text, bgcolor=color.new(color.blue, 50))
+
+    cur_pnl = strategy.netprofit
+    pnl_pct = (cur_pnl / strategy.initial_capital) * 100
+    
+    table.cell(daily, 0, 1, "Overall PnL %", text_color=color_text)
+    table.cell(daily, 1, 1, str.tostring(pnl_pct, "#.##") + " %", text_color=color_text)
+    table.cell(daily, 2, 1, cur_pnl >= 0 ? "🟢 PROFIT" : "🔴 LOSS", text_color=color_text)
+
+// Simple FVG Plotting
+plotshape(fvg_bull, style=shape.triangleup, location=location.belowbar, color=color.new(color.teal, 0), size=size.small, title="Bull FVG")
+plotshape(fvg_bear, style=shape.triangledown, location=location.abovebar, color=color.new(color.red, 0), size=size.small, title="Bear FVG")

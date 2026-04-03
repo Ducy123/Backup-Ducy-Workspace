@@ -1,0 +1,198 @@
+// ============================================================
+// TRADING INDICATOR - Pine Script v6
+// Tác giả   : [Your Name]
+// Tên       : AMD Wyckoff Indicator v4.0 (Kill Zones & Checklist)
+// ============================================================
+
+//@version=6
+indicator("AMD Wyckoff Indicator v4.0", "AMD-Indi v4", overlay=true, max_boxes_count=500, max_labels_count=500)
+
+// ============================================================
+// 1. SETTINGS
+// ============================================================
+grp_time = "0 - KILL ZONES (PHIÊN GIAO DỊCH)"
+tz         = input.string("UTC+3", title="Múi giờ Broker (VD: UTC+3)", group=grp_time) // Thường MT5 là UTC+2/3
+asian_sess = input.session("0000-0800", title="1. Phiên Á (Gom Hàng)", group=grp_time)
+man_sess   = input.session("0800-1400", title="2. Cửa sổ Thao túng (London/NY Open)", group=grp_time)
+
+grp_filt = "1 - BỘ LỌC TÍN HIỆU (FILTERS)"
+ema_len    = input.int(200, title="Độ dài EMA (Xu hướng dài hạn)", group=grp_filt)
+atr_len    = input.int(14, title="Độ dài ATR", group=grp_filt)
+acc_width  = input.float(3.0, title="Độ rộng tối đa Phiên Á (x ATR)", step=0.5, group=grp_filt)
+sl_buffer  = input.float(0.5, title="Đệm cắt lỗ SL (x ATR)", step=0.1, group=grp_filt)
+
+grp_dist = "2 - VÙNG DISTRIBUTION"
+dist_len   = input.int(15, title="Độ dài Hộp Distribution chốt lời (Nến)", group=grp_dist)
+
+grp_dash = "3 - CHECKLIST DASHBOARD"
+show_dash  = input.bool(true, title="Hiển thị Bảng Checklist", group=grp_dash)
+
+// ============================================================
+// 2. TIMERS & FILTERS
+// ============================================================
+in_asian = not na(time(timeframe.period, asian_sess, tz))
+in_man   = not na(time(timeframe.period, man_sess, tz))
+
+// Phát hiện nến bắt đầu / kết thúc phiên Á
+asian_start = in_asian and not in_asian[1]
+asian_end   = not in_asian and in_asian[1]
+
+ema200 = ta.ema(close, ema_len)
+atr    = ta.atr(atr_len)
+
+plot(ema200, color=color.new(color.orange, 0), title="EMA 200", linewidth=2)
+
+// ============================================================
+// 3. AMD LOGIC (STATE MACHINE CHUẨN MỚI)
+// ============================================================
+var int   state       = 0 // 0: Đợi, 1: Hộp Á xong, 2: Man Short, 3: Man Long, 4: Signal Đã Kích Hoạt
+var float acc_top     = na
+var float acc_bot     = na
+var int   acc_start_x = na
+var float man_top     = na
+var float man_bot     = na
+var int   man_start_x = na
+
+// Lưu box để modify thay vì vẽ đè chồng chéo
+var box   acc_box     = na
+var box   man_box     = na
+var box   dist_box    = na
+
+// Biến lưu trữ tình trạng cho Bảng Checklist
+var string dash_acc_status   = "⏳ Đang Chờ Phiên Á"
+var string dash_trend_status = "..."
+var string dash_man_status   = "..."
+var string dash_sig_status   = "..."
+
+// Khi trong Phiên Á: Bắt đầu dò dẫm thanh khoản
+if asian_start
+    state       := 0
+    acc_top     := high
+    acc_bot     := low
+    acc_start_x := bar_index
+    
+    // Draw initial box
+    acc_box := box.new(left=acc_start_x, top=acc_top, right=bar_index, bottom=acc_bot, 
+         border_color=color.new(color.blue, 20), border_width=2,
+         bgcolor=color.new(color.blue, 90), text="Asian (Acc)", text_color=color.blue, text_size=size.small)
+         
+    dash_acc_status   := "🔍 Đang Gom Hàng (Accumulation)"
+    dash_trend_status := "..."
+    dash_man_status   := "..."
+    dash_sig_status   := "..."
+
+if in_asian
+    if high > acc_top
+        acc_top := high
+    if low < acc_bot
+        acc_bot := low
+    
+    // Nới rộng chiều dài & chiều cao của hộp Á liên tục 
+    box.set_right(acc_box, bar_index)
+    box.set_top(acc_box, acc_top)
+    box.set_bottom(acc_box, acc_bot)
+
+// Chốt hộp Phiên Á khi Hết Giờ (London Open)
+if asian_end
+    if (acc_top - acc_bot) <= (atr * acc_width)
+        state := 1 // Kích hoạt chạy Manipulation Box
+        dash_acc_status := "✅ Hợp Lệ (Valid Range)"
+    else
+        state := 0 // Biên độ rác / quá rộng, phế
+        dash_acc_status := "❌ Hộp Á Rác (Quá Rộng/Nhiễu)"
+        box.set_bgcolor(acc_box, color.new(color.gray, 90))
+        box.set_border_color(acc_box, color.new(color.gray, 50))
+        box.set_text(acc_box, "Asian (Invalid)")
+
+// Khi ở trong Cửa Sổ Thao Túng (Từ lúc Phiên Á kết thúc -> Cut-off Time)
+if in_man
+    // 1. Xét Mồi Quét Thanh Khoản Ra Ngoài (Mở Manipulation)
+    if state == 1 or state == 4
+        if high > acc_top
+            state := 2
+            man_top := high
+            man_bot := acc_top
+            man_start_x := bar_index
+            man_box := box.new(left=man_start_x, top=man_top, right=bar_index, bottom=man_bot, 
+                 border_color=color.new(color.purple, 20), border_width=2, border_style=line.style_dashed,
+                 bgcolor=color.new(color.purple, 85), text="Man (Short Bias)", text_color=color.purple, text_size=size.small)
+            dash_man_status := "👀 Đang chọc đỉnh Á (Sweep High)"
+            
+        else if low < acc_bot
+            state := 3
+            man_bot := low
+            man_top := acc_bot
+            man_start_x := bar_index
+            man_box := box.new(left=man_start_x, top=man_top, right=bar_index, bottom=man_bot, 
+                 border_color=color.new(color.purple, 20), border_width=2, border_style=line.style_dashed,
+                 bgcolor=color.new(color.purple, 85), text="Man (Long Bias)", text_color=color.purple, text_size=size.small)
+            dash_man_status := "👀 Đang xé đáy Á (Sweep Low)"
+            
+    // 2. Nếu đang rình Setup Vỡ Giả Đỉnh (SHORT)
+    if state == 2
+        dash_trend_status := close < ema200 ? "✅ Thuận Trend Giảm" : "❌ Ngược Trend Tăng (Nên bỏ qua)"
+        if high > man_top
+            man_top := high
+            box.set_top(man_box, man_top)
+        box.set_right(man_box, bar_index)
+        
+        // Nến bị dội ngược ngập vào trong hộp Á (Judas Swing done) & Thỏa mãn EMA
+        if close <= acc_top and close < ema200
+            dist_box := box.new(left=bar_index, top=acc_top, right=bar_index + dist_len, bottom=acc_bot, 
+                 border_color=color.new(color.red, 20), border_width=2,
+                 bgcolor=color.new(color.red, 80), text="Dist (Target)", text_color=color.red, text_size=size.small)
+                 
+            sl_price = man_top + (atr * sl_buffer)
+            tp_price = acc_bot
+            
+            label.new(bar_index, high + atr, text="⬇️ SHORT\nSL: " + str.tostring(sl_price, format.mintick) + "\nTP: " + str.tostring(tp_price, format.mintick), color=color.red, textcolor=color.white, style=label.style_label_down, size=size.small)
+            alert("AMD Short Signal Re-entry/Entry", alert.freq_once_per_bar_close)
+            
+            dash_sig_status := "🔥 Đã cấp lệnh SHORT!"
+            state := 4
+            
+    // 3. Nếu đang rình Setup Vỡ Giả Đáy (LONG)
+    else if state == 3
+        dash_trend_status := close > ema200 ? "✅ Thuận Trend Tăng" : "❌ Ngược Trend Giảm (Nên bỏ qua)"
+        if low < man_bot
+            man_bot := low
+            box.set_bottom(man_box, man_bot)
+        box.set_right(man_box, bar_index)
+        
+        // Nến bật ngược ngập trở lại bên trên đáy Á (Spring done) & Thỏa mãn EMA
+        if close >= acc_bot and close > ema200
+            dist_box := box.new(left=bar_index, top=acc_top, right=bar_index + dist_len, bottom=acc_bot, 
+                 border_color=color.new(color.green, 20), border_width=2,
+                 bgcolor=color.new(color.green, 85), text="Dist (Target)", text_color=color.green, text_size=size.small)
+                 
+            sl_price = man_bot - (atr * sl_buffer)
+            tp_price = acc_top
+            
+            label.new(bar_index, low - atr, text="⬆️ LONG\nSL: " + str.tostring(sl_price, format.mintick) + "\nTP: " + str.tostring(tp_price, format.mintick), color=color.green, textcolor=color.white, style=label.style_label_up, size=size.small)
+            alert("AMD Long Signal Re-entry/Entry", alert.freq_once_per_bar_close)
+            
+            dash_sig_status := "🔥 Đã cấp lệnh LONG!"
+            state := 4
+            
+    // 4. Nếu đã Bắn Lệnh nhưng lại bị đục chọc thủng đỉnh/đáy mới (Re-entry Logic Tối Cao)
+    else if state == 4
+        if high > man_top and close > acc_top
+            man_top := high
+            state := 2 // Rơi lại về bẫy rình Short 
+            dash_sig_status := "⚠️ Quét SL! Đang bắt Re-entry Short..."
+        else if low < man_bot and close < acc_bot
+            man_bot := low
+            state := 3 // Rơi lại về bẫy rình Long
+            dash_sig_status := "⚠️ Quét SL! Đang bắt Re-entry Long..."
+
+// ============================================================
+// 4. HIỂN THỊ BẢNG CHECKLIST (DASHBOARD)
+// ============================================================
+var table dash = table.new(position.top_right, 1, 5, border_width=1, border_color=color.gray, frame_color=color.gray, frame_width=1)
+
+if show_dash and barstate.islast
+    table.cell(dash, 0, 0, "🔶 AMD WYCKOFF CHECKLIST 🔶", text_color=color.white, bgcolor=color.new(color.blue, 20), text_size=size.large)
+    table.cell(dash, 0, 1, "1. Phiên Giao Dịch (Á): " + dash_acc_status, text_color=color.white, text_halign=text.align_left, bgcolor=color.new(color.black, 40))
+    table.cell(dash, 0, 2, "2. Quét Thanh Khoản: " + dash_man_status, text_color=color.white, text_halign=text.align_left, bgcolor=color.new(color.black, 40))
+    table.cell(dash, 0, 3, "3. Màng Lọc EMA 200: " + dash_trend_status, text_color=color.white, text_halign=text.align_left, bgcolor=color.new(color.black, 40))
+    table.cell(dash, 0, 4, "4. Tình Trạng Hợp Đồng: " + dash_sig_status, text_color=color.white, text_halign=text.align_left, bgcolor=color.new(color.black, 40))

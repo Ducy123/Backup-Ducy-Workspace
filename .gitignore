@@ -1,0 +1,6 @@
+# Git Ignore for sensitive files
+# These files were blocked by GitHub Push Protection
+**/auth-profiles.json
+**/openclaw.json
+**/openclaw.json.bak*
+**/vps_config.json

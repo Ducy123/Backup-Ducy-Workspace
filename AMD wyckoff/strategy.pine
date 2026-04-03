@@ -1,0 +1,182 @@
+// ============================================================
+// TRADING STRATEGY - Pine Script v6
+// Tác giả   : [Your Name]
+// Tên       : AMD Wyckoff Strategy (Tối ưu cho M5)
+// ============================================================
+
+//@version=6
+strategy(
+     title             = "AMD Wyckoff Strategy v3.1",
+     shorttitle        = "AMD-Logic",
+     overlay           = true,
+     pyramiding        = 0,
+     default_qty_type  = strategy.percent_of_equity,
+     default_qty_value = 10,
+     initial_capital   = 10000,
+     currency          = currency.USD,
+     commission_type   = strategy.commission.percent,
+     commission_value  = 0.05,
+     slippage          = 2,
+     max_boxes_count   = 500
+ )
+
+// ============================================================
+// 1. SETTINGS THEO LÝ THUYẾT WYCKOFF
+// ============================================================
+grp_time = "0 - BỘ LỌC THỜI GIAN (TIME ZONE)"
+i_sess   = input.session("0600-2230", title="Khung Giờ Hoạt Động", group=grp_time)
+i_tz     = input.string("Asia/Ho_Chi_Minh", title="Múi giờ (GMT+7)", group=grp_time)
+
+grp_acc = "1 - VÙNG ACCUMULATION (TÍCH LŨY MỚI)"
+acc_length    = input.int(20, title="Độ dài tối thiểu Accumulation (Số nến)", minval=5, group=grp_acc)
+acc_width_atr = input.float(3.0, title="Biên độ đi ngang tối đa (x ATR)", step=0.5, group=grp_acc)
+
+grp_man = "2 - VÙNG MANIPULATION (CHÓT PHÁ VỠ GIẢ / SPRING)"
+max_man_bars  = input.int(8, title="Thời gian Manipulation tối đa (Số nến)", group=grp_man)
+max_man_dist  = input.float(1.5, title="Khoảng quét tối đa (x Chiều cao hộp Acc)", step=0.1, group=grp_man)
+
+grp_dist = "3 - VÙNG DISTRIBUTION (HIỂN THỊ)"
+dist_box_len  = input.int(15, title="Chiều dài hộp Distribution vẽ ra (Số nến)", minval=1, group=grp_dist)
+
+// ============================================================
+// 2. DETECTOR & SESSION
+// ============================================================
+// Lọc chỉ bật trong khung giờ được chỉ định theo GMT+7
+in_session = not na(time(timeframe.period, i_sess, i_tz))
+
+atr = ta.atr(14)
+hh = ta.highest(high, acc_length)
+ll = ta.lowest(low, acc_length)
+
+is_sideways = (hh - ll) <= (atr * acc_width_atr)
+
+// ============================================================
+// 3. LOGIC XỬ LÝ AMD (LỌC THEO WYCKOFF)
+// ============================================================
+
+var int state = 0 
+var float acc_top = na
+var float acc_bot = na
+var int   acc_start = na
+var box   acc_box = na
+
+var float man_top = na
+var float man_bot = na
+var int   man_start = na
+var box   man_box = na
+
+var bool can_search = true 
+var box  dist_box = na
+
+// Reset State và xóa khung rác nếu đã ra ngoài khung giờ hoạt động (sau 22h30 và trước 06h00)
+if not in_session
+    if state != 0
+        box.delete(acc_box)
+        if state == 2 or state == 3
+            box.delete(man_box)
+        state := 0
+
+if state == 0 and not is_sideways
+    can_search := true
+
+if state == 0
+    // Chỉ bắt đầu tìm hộp khi đang TRONG khung giờ cho phép
+    if is_sideways and can_search and in_session
+        state := 1
+        acc_top := hh
+        acc_bot := ll
+        acc_start := bar_index - acc_length + 1
+        can_search := false 
+        
+        acc_box := box.new(left=acc_start, top=acc_top, right=bar_index, bottom=acc_bot, 
+             border_color=color.new(color.blue, 40), 
+             border_width=1,
+             bgcolor=color.new(color.blue, 90), 
+             text="Acc", text_color=color.blue, text_size=size.small)
+
+else if state == 1
+    if close > acc_top
+        state := 2 
+        man_start := bar_index
+        man_top := high
+        man_bot := acc_top 
+        man_box := box.new(left=man_start, top=man_top, right=bar_index, bottom=man_bot, 
+             border_color=color.new(color.purple, 20), 
+             border_style=line.style_dashed,
+             bgcolor=color.new(color.purple, 80), 
+             text="Man(Up)", text_color=color.purple, text_size=size.small)
+        
+    else if close < acc_bot
+        state := 3 
+        man_start := bar_index
+        man_bot := low
+        man_top := acc_bot 
+        man_box := box.new(left=man_start, top=man_top, right=bar_index, bottom=man_bot, 
+             border_color=color.new(color.purple, 20), 
+             border_style=line.style_dashed,
+             bgcolor=color.new(color.purple, 80), 
+             text="Man(Dn)", text_color=color.purple, text_size=size.small)
+             
+    else
+        box.set_right(acc_box, bar_index)
+        
+        if high > acc_top
+            acc_top := high
+            box.set_top(acc_box, acc_top)
+        if low < acc_bot
+            acc_bot := low
+            box.set_bottom(acc_box, acc_bot)
+
+else if state == 2 
+    
+    acc_height = acc_top - acc_bot
+    is_invalid_time = (bar_index - man_start) > max_man_bars
+    is_invalid_dist = (high - acc_top) > (acc_height * max_man_dist)
+
+    if is_invalid_time or is_invalid_dist
+        box.delete(acc_box)
+        box.delete(man_box)
+        state := 0
+    
+    else if close <= acc_top 
+        dist_box := box.new(left=bar_index, top=close, right=bar_index + dist_box_len, bottom=acc_bot, 
+             border_color=color.new(color.red, 20), 
+             bgcolor=color.new(color.red, 80), 
+             text="Dist(Target)", text_color=color.red, text_size=size.small)
+             
+        strategy.entry("Short", strategy.short)
+        strategy.exit("Exit Short", "Short", stop=man_top, limit=acc_bot)
+        
+        state := 0
+    else
+        if high > man_top
+            man_top := high
+            box.set_top(man_box, man_top)
+        box.set_right(man_box, bar_index)
+
+else if state == 3 
+    
+    acc_height = acc_top - acc_bot
+    is_invalid_time = (bar_index - man_start) > max_man_bars
+    is_invalid_dist = (acc_bot - low) > (acc_height * max_man_dist)
+
+    if is_invalid_time or is_invalid_dist
+        box.delete(acc_box)
+        box.delete(man_box)
+        state := 0
+    
+    else if close >= acc_bot
+        dist_box := box.new(left=bar_index, top=acc_top, right=bar_index + dist_box_len, bottom=close, 
+             border_color=color.new(color.green, 20), 
+             bgcolor=color.new(color.green, 90), 
+             text="Dist(Target)", text_color=color.green, text_size=size.small)
+             
+        strategy.entry("Long", strategy.long)
+        strategy.exit("Exit Long", "Long", stop=man_bot, limit=acc_top)
+        
+        state := 0
+    else
+        if low < man_bot
+            man_bot := low
+            box.set_bottom(man_box, man_bot)
+        box.set_right(man_box, bar_index)
